@@ -9,12 +9,18 @@ from collections import deque
 import threading
 import time
 
+
 MAX_POINTS = 100
 
-x_data = deque(maxlen=MAX_POINTS)
-y_data = deque(maxlen=MAX_POINTS)
-z_data = deque(maxlen=MAX_POINTS)
+data_buffers = {
+    "Accelerometer_X": deque(maxlen=MAX_POINTS),
+    "Accelerometer_Y": deque(maxlen=MAX_POINTS),
+    "Accelerometer_Z": deque(maxlen=MAX_POINTS)
+}
 
+latest_update = None
+
+data_lock = threading.Lock()
 
 client = ArduinoCloudClient(
     device_id=DEVICE_ID,
@@ -28,29 +34,56 @@ client.register("Accelerometer_Y", value=None)
 client.register("Accelerometer_Z", value=None)
 
 
+def get_accelerometer_data(client):
+
+
+    global latest_update
+
+    client.update()
+
+    x = client["Accelerometer_X"]
+    y = client["Accelerometer_Y"]
+    z = client["Accelerometer_Z"]
+
+    if x is not None and y is not None and z is not None:
+
+        x = float(x)
+        y = float(y)
+        z = float(z)
+
+        with data_lock:
+
+            # Store values in the buffers
+            data_buffers["Accelerometer_X"].append(x)
+            data_buffers["Accelerometer_Y"].append(y)
+            data_buffers["Accelerometer_Z"].append(z)
+
+            # Sample number
+            sample_number = len(data_buffers["Accelerometer_X"]) - 1
+
+            latest_update = {
+                "x": [
+                    [sample_number],
+                    [sample_number],
+                    [sample_number]
+                ],
+                "y": [
+                    [x],
+                    [y],
+                    [z]
+                ]
+            }
+
+    return x, y, z
+
+
 def collect_data():
     client.start()
 
     while True:
-        client.update()
-
-        x = client["Accelerometer_X"]
-        y = client["Accelerometer_Y"]
-        z = client["Accelerometer_Z"]
-
-        if x is not None:
-            x_data.append(float(x))
-
-        if y is not None:
-            y_data.append(float(y))
-
-        if z is not None:
-            z_data.append(float(z))
-
+        get_accelerometer_data(client)
         time.sleep(0.1)
 
-
-# Start Cloud data collection
 data_thread = threading.Thread(
     target=collect_data,
     daemon=True
@@ -58,59 +91,75 @@ data_thread = threading.Thread(
 
 data_thread.start()
 
-
 app = Dash(__name__)
 
 app.layout = html.Div([
+
     html.H1("Live Accelerometer Data"),
 
-    dcc.Graph(id="accelerometer-graph"),
+    dcc.Graph(
+        id="accelerometer-graph",
+
+        figure=go.Figure(
+            data=[
+                go.Scatter(
+                    x=[],
+                    y=[],
+                    mode="lines",
+                    name="Accelerometer X"
+                ),
+                go.Scatter(
+                    x=[],
+                    y=[],
+                    mode="lines",
+                    name="Accelerometer Y"
+                ),
+                go.Scatter(
+                    x=[],
+                    y=[],
+                    mode="lines",
+                    name="Accelerometer Z"
+                )
+            ],
+
+            layout=go.Layout(
+                title="Live Accelerometer X, Y, Z",
+                xaxis_title="Sample",
+                yaxis_title="Acceleration",
+                yaxis=dict(range=[-2, 2])
+            )
+        )
+    ),
 
     dcc.Interval(
         id="interval-component",
-        interval=500,
+        interval=200,
         n_intervals=0
     )
 ])
 
 
 @app.callback(
-    Output("accelerometer-graph", "figure"),
+    Output("accelerometer-graph", "extendData"),
     Input("interval-component", "n_intervals")
 )
 def update_graph(n):
 
-    fig = go.Figure()
+    with data_lock:
 
-    fig.add_trace(go.Scatter(
-        y=list(x_data),
-        mode="lines",
-        name="Accelerometer X"
-    ))
+        if latest_update is None:
+            return (
+                {
+                    "x": [[], [], []],
+                    "y": [[], [], []]
+                },
+                [0, 1, 2],
+                MAX_POINTS
+            )
 
-    fig.add_trace(go.Scatter(
-        y=list(y_data),
-        mode="lines",
-        name="Accelerometer Y"
-    ))
+        update = latest_update
 
-    fig.add_trace(go.Scatter(
-        y=list(z_data),
-        mode="lines",
-        name="Accelerometer Z"
-    ))
-
-    fig.update_layout(
-        title="Live Accelerometer X, Y, Z",
-        xaxis_title="Sample",
-        yaxis_title="Acceleration",
-        yaxis=dict(range=[-2, 2]),
-        xaxis=dict(
-            range=[0, MAX_POINTS]
-        )
-    )
-
-    return fig
+    return update, [0, 1, 2], MAX_POINTS
 
 
 if __name__ == "__main__":
